@@ -93,6 +93,24 @@ public class ConversationService implements IConversationService {
     }
 
     /**
+     * Update a conversation's title.
+     */
+    @Transactional
+    public ConversationResponse updateConversationTitle(Long id, String title) {
+        logger.info("Updating conversation {} with new title: {}", id, title);
+
+        Conversation conversation = conversationRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Conversation", "id", id));
+
+        conversation.setTitle(title);
+        Conversation updated = conversationRepository.save(conversation);
+
+        logger.info("Successfully updated conversation {}", id);
+
+        return mapToConversationResponse(updated, false);
+    }
+
+    /**
      * Send a message to a conversation and get AI response. This is the core method that: 1. Retrieves conversation history from database
      * 2. Saves the user's message 3. Builds context for the LLM 4. Calls OpenAI API 5. Saves the assistant's response 6. Returns the
      * assistant message

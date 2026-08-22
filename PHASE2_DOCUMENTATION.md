@@ -848,6 +848,172 @@ GET http://localhost:8081/api/conversations/999
 - Provided Java Hello World example
 - **This proves conversation history is working!**
 
+✅ **Test 5: Automatic Title Update Based on First Message**
+- When first message is sent in a conversation, the title auto-updates
+- Frontend extracts first 5 words (max 50 chars) from user's message
+- Sends PUT request to `/api/conversations/{id}` with new title
+- Backend updates conversation title in database
+- Sidebar immediately reflects the updated title
+
+**Example:**
+```
+User sends: "What is Java programming language?"
+→ Title updates from "New Chat" to "What is Java programming language?"
+
+User sends: "Can you explain object-oriented programming concepts in detail?"
+→ Title updates to "Can you explain object-oriented programm..."
+```
+
+**Implementation Details:**
+
+**Backend - Update Endpoint:**
+
+1. **DTO Created:** `UpdateConversationRequest.java`
+   ```java
+   public class UpdateConversationRequest {
+       private String title;
+       
+       public String getTitle() { return title; }
+       public void setTitle(String title) { this.title = title; }
+   }
+   ```
+
+2. **API Interface Updated:** `IConversationAPI.java`
+   ```java
+   @PutMapping("/{id}")
+   ResponseEntity<ConversationResponse> updateConversation(
+       @PathVariable Long id, 
+       @RequestBody UpdateConversationRequest request
+   );
+   ```
+
+3. **Service Interface Updated:** `IConversationService.java`
+   ```java
+   ConversationResponse updateConversationTitle(Long id, String title);
+   ```
+
+4. **Service Implementation:** `ConversationService.java`
+   ```java
+   @Transactional
+   public ConversationResponse updateConversationTitle(Long id, String title) {
+       Conversation conversation = conversationRepository.findById(id)
+           .orElseThrow(() -> new ResourceNotFoundException("Conversation", "id", id));
+       
+       conversation.setTitle(title);
+       Conversation updated = conversationRepository.save(conversation);
+       
+       return mapToConversationResponse(updated, false);
+   }
+   ```
+
+5. **Controller Implementation:** `ConversationController.java`
+   ```java
+   @Override
+   public ResponseEntity<ConversationResponse> updateConversation(
+       Long id, 
+       UpdateConversationRequest request
+   ) {
+       logger.info("PUT /api/conversations/{} - Updating conversation title to: {}", 
+           id, request.getTitle());
+       
+       ConversationResponse response = conversationService.updateConversationTitle(
+           id, request.getTitle()
+       );
+       
+       return ResponseEntity.ok(response);
+   }
+   ```
+
+**Frontend - Title Generation:**
+
+1. **API Service Updated:** `services/api.ts`
+   ```typescript
+   export const conversationsApi = {
+     // ... other methods
+     update: (id: string, data: { title: string }): Promise<Conversation> => {
+       return fetchJSON<Conversation>(`/conversations/${id}`, {
+         method: 'PUT',
+         body: JSON.stringify(data),
+       });
+     },
+   };
+   ```
+
+2. **ChatContext Updated:** `ChatContext.tsx`
+   ```typescript
+   const sendMessage = useCallback(async (content: string) => {
+     if (!selectedConversationId) return;
+     
+     try {
+       setSendingMessage(true);
+       
+       // Check if this is the first message
+       const isFirstMessage = messages.length === 0;
+       
+       // Send message to backend
+       const response = await messagesApi.send(selectedConversationId, { content });
+       
+       // Reload all messages
+       const allMessages = await messagesApi.getByConversationId(selectedConversationId);
+       setMessages(allMessages);
+       
+       // If first message, update title
+       if (isFirstMessage) {
+         const words = content.trim().split(/\s+/);
+         const title = words.slice(0, 5).join(' ');
+         const shortTitle = title.length > 50 ? title.substring(0, 47) + '...' : title;
+         
+         try {
+           await conversationsApi.update(selectedConversationId, { title: shortTitle });
+         } catch (err) {
+           console.error('Error updating title:', err);
+           // Non-critical error, don't block message flow
+         }
+       }
+       
+       // Reload conversations to show updated title
+       await loadConversations();
+       
+     } finally {
+       setSendingMessage(false);
+     }
+   }, [selectedConversationId, messages.length, loadConversations]);
+   ```
+
+**Why This Approach:**
+- **User Experience:** Conversations get meaningful names automatically
+- **No Manual Input:** User doesn't need to name conversations
+- **Context-Aware:** Title reflects actual conversation content
+- **Non-Blocking:** Title update failure doesn't prevent message from being sent
+- **One-Time Only:** Only updates on first message, preserving user-edited titles
+
+**Database Changes:**
+```sql
+-- Title update query
+UPDATE conversations 
+SET title = 'What is Java programming language?',
+    updated_at = NOW()
+WHERE id = 1;
+```
+
+**HTTP Request Flow:**
+```
+1. User sends first message: "What is Java?"
+   → POST /api/conversations/1/messages
+   → Backend saves message, calls OpenAI, returns response
+
+2. Frontend generates title: "What is Java?"
+   → PUT /api/conversations/1
+   → Body: {"title": "What is Java?"}
+   → Backend updates conversation.title
+
+3. Frontend reloads conversations
+   → GET /api/conversations
+   → Returns updated list with new title
+
+4. Sidebar shows: "What is Java?" instead of "New Chat"
+```
+
 ✅ **Test 5: Get Conversation with Messages**
 - Retrieved complete conversation including all 4 messages
 - Messages in chronological order
