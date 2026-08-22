@@ -4,6 +4,7 @@ import com.abhay.api.IConversationAPI;
 import com.abhay.exception.ResourceNotFoundException;
 import com.abhay.model.dto.ConversationResponse;
 import com.abhay.model.dto.CreateConversationRequest;
+import com.abhay.model.dto.UpdateConversationRequest;
 import com.abhay.model.dto.MessageResponse;
 import com.abhay.model.dto.SendMessageRequest;
 import com.abhay.service.IConversationService;
@@ -87,6 +88,15 @@ public class ConversationController implements IConversationAPI {
         List<MessageResponse> messages = conversationService.getMessages(id);
 
         return ResponseEntity.ok(messages);
+    }
+
+    @Override
+    public ResponseEntity<ConversationResponse> updateConversation(Long id, UpdateConversationRequest request) {
+        logger.info("PUT /api/conversations/{} - Updating conversation title to: {}", id, request.getTitle());
+
+        ConversationResponse response = conversationService.updateConversationTitle(id, request.getTitle());
+
+        return ResponseEntity.ok(response);
     }
 
     /**

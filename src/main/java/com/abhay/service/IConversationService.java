@@ -47,6 +47,16 @@ public interface IConversationService {
     void deleteConversation(Long id);
 
     /**
+     * Update a conversation's title.
+     *
+     * @param id Conversation ID
+     * @param title New title
+     * @return Updated ConversationResponse
+     * @throws com.abhay.exception.ResourceNotFoundException if conversation not found
+     */
+    ConversationResponse updateConversationTitle(Long id, String title);
+
+    /**
      * Send a message to a conversation and get AI response.
      *
      * This method:

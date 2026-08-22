@@ -2,6 +2,7 @@ package com.abhay.api;
 
 import com.abhay.model.dto.ConversationResponse;
 import com.abhay.model.dto.CreateConversationRequest;
+import com.abhay.model.dto.UpdateConversationRequest;
 import com.abhay.model.dto.MessageResponse;
 import com.abhay.model.dto.SendMessageRequest;
 import org.springframework.http.ResponseEntity;
@@ -54,6 +55,18 @@ public interface IConversationAPI {
      */
     @DeleteMapping("/{id}")
     ResponseEntity<Void> deleteConversation(@PathVariable Long id);
+
+    /**
+     * Update a conversation's title.
+     *
+     * @param id
+     *         Conversation ID
+     * @param request
+     *         Contains new title
+     * @return ResponseEntity with updated ConversationResponse (200 OK)
+     */
+    @PutMapping("/{id}")
+    ResponseEntity<ConversationResponse> updateConversation(@PathVariable Long id, @RequestBody UpdateConversationRequest request);
 
     /**
      * Send a message to a conversation and get AI response.
