@@ -7,13 +7,13 @@ import com.abhay.model.dto.MessageResponse;
 import com.abhay.model.dto.SendMessageRequest;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.util.List;
 
 /**
- * Conversation API Interface - Defines the contract for conversation management endpoints.
- * This interface separates the API contract from the implementation, making it easier to maintain, test, and potentially create alternative
- * implementations.
+ * Conversation API Interface - Defines the contract for conversation management endpoints. This interface separates the API contract from
+ * the implementation, making it easier to maintain, test, and potentially create alternative implementations.
  */
 @RequestMapping("/api/conversations")
 public interface IConversationAPI {
@@ -69,7 +69,7 @@ public interface IConversationAPI {
     ResponseEntity<ConversationResponse> updateConversation(@PathVariable Long id, @RequestBody UpdateConversationRequest request);
 
     /**
-     * Send a message to a conversation and get AI response.
+     * Send a message to a conversation and get AI response. NON-STREAMING VERSION (original endpoint - kept for compatibility)
      *
      * @param id
      *         Conversation ID
@@ -79,6 +79,18 @@ public interface IConversationAPI {
      */
     @PostMapping("/{id}/messages")
     ResponseEntity<MessageResponse> sendMessage(@PathVariable Long id, @RequestBody SendMessageRequest request);
+
+    /**
+     * Send a message to a conversation and stream the AI response. STREAMING VERSION (new endpoint using Server-Sent Events)
+     *
+     * @param id
+     *         Conversation ID
+     * @param request
+     *         Contains message content
+     * @return SseEmitter for streaming response chunks
+     */
+    @PostMapping("/{id}/messages/stream")
+    SseEmitter sendMessageStream(@PathVariable Long id, @RequestBody SendMessageRequest request);
 
     /**
      * Get all messages for a conversation.

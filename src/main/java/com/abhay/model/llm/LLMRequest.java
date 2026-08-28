@@ -6,20 +6,20 @@ import java.util.List;
 
 /**
  * Represents the request body sent to OpenAI's Chat Completions API.
- *
- * Key fields:
- * - model: The OpenAI model to use (e.g., "gpt-4", "gpt-3.5-turbo")
- * - messages: Array of conversation messages (system, user, assistant)
- * - temperature: Controls randomness (0.0 = deterministic, 2.0 = very random)
- * - max_tokens: Maximum length of the response
+ * Key fields: - model: The OpenAI model to use (e.g., "gpt-4", "gpt-3.5-turbo") - messages: Array of conversation messages (system, user,
+ * assistant) - temperature: Controls randomness (0.0 = deterministic, 2.0 = very random) - max_tokens: Maximum length of the response
  */
 public class LLMRequest {
+
     private String model;
     private List<Message> messages;
     private Double temperature;
 
     @JsonProperty("max_tokens")
     private Integer maxTokens;
+
+    // Enable streaming responses
+    private Boolean stream;
 
     // Constructors
     public LLMRequest() {
@@ -70,5 +70,13 @@ public class LLMRequest {
 
     public void setMaxTokens(Integer maxTokens) {
         this.maxTokens = maxTokens;
+    }
+
+    public Boolean getStream() {
+        return stream;
+    }
+
+    public void setStream(Boolean stream) {
+        this.stream = stream;
     }
 }

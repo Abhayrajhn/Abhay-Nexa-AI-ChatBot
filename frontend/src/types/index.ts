@@ -7,10 +7,12 @@ export interface Conversation {
   updatedAt: string;  // ISO 8601 timestamp
 }
 
-export enum MessageRole {
-  USER = 'USER',
-  ASSISTANT = 'ASSISTANT'
-}
+export type MessageRole = 'USER' | 'ASSISTANT';
+
+export const MessageRole = {
+  USER: 'USER' as MessageRole,
+  ASSISTANT: 'ASSISTANT' as MessageRole,
+};
 
 export interface Message {
   id: string;
