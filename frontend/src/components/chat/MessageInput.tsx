@@ -1,22 +1,27 @@
-import { useState, KeyboardEvent } from 'react';
+import { useState } from 'react';
+import type { KeyboardEvent } from 'react';
 import { useChatContext } from '../../contexts/ChatContext';
 
 /**
- * MessageInput Component - REDESIGNED
+ * MessageInput Component - REDESIGNED WITH STREAMING
  *
  * Beautiful modern input with:
  * - Gradient send button
  * - Smooth animations
  * - Better UX
+ * - Disabled during streaming
  */
 
 export default function MessageInput() {
-  const { sendMessage, sendingMessage } = useChatContext();
+  const { sendMessage, sendingMessage, isStreaming } = useChatContext();
   const [input, setInput] = useState('');
+
+  // Disable input while sending or streaming
+  const isDisabled = sendingMessage || isStreaming;
 
   const handleSend = async () => {
     if (!input.trim()) return;
-    if (sendingMessage) return;
+    if (isDisabled) return;
 
     try {
       await sendMessage(input.trim());
@@ -42,8 +47,8 @@ export default function MessageInput() {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Ask anything..."
-            disabled={sendingMessage}
+            placeholder={isStreaming ? "Waiting for response..." : "Ask anything..."}
+            disabled={isDisabled}
             rows={1}
             className="
               w-full resize-none rounded-2xl border-2 px-5 py-4
@@ -70,7 +75,7 @@ export default function MessageInput() {
         {/* Send Button - Red gradient */}
         <button
           onClick={handleSend}
-          disabled={!input.trim() || sendingMessage}
+          disabled={!input.trim() || isDisabled}
           className="
             px-6 py-4 rounded-2xl font-semibold
             bg-gradient-to-r from-red-600 to-red-700 hover:from-red-700 hover:to-red-800
@@ -88,7 +93,16 @@ export default function MessageInput() {
           {/* Shimmer effect */}
           <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent -translate-x-full group-hover:translate-x-full transition-transform duration-1000"></div>
 
-          {sendingMessage ? (
+          {isStreaming ? (
+            <>
+              {/* Streaming indicator - pulsing dots */}
+              <div className="flex gap-1">
+                <div className="w-2 h-2 bg-white rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
+                <div className="w-2 h-2 bg-white rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
+                <div className="w-2 h-2 bg-white rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
+              </div>
+            </>
+          ) : sendingMessage ? (
             <>
               {/* Loading spinner - circular buffering */}
               <div className="animate-spin rounded-full h-5 w-5 border-2 border-white border-t-transparent relative"></div>
@@ -117,15 +131,27 @@ export default function MessageInput() {
 
       {/* Hint text */}
       <div className="text-xs text-center mt-3 flex items-center justify-center gap-2 text-gray-500">
-        <span className="inline-flex items-center gap-1 px-2 py-1 rounded bg-gray-800">
-          <kbd className="font-mono font-semibold text-gray-300">Enter</kbd>
-          to send
-        </span>
-        <span className="text-gray-700">•</span>
-        <span className="inline-flex items-center gap-1 px-2 py-1 rounded bg-gray-800">
-          <kbd className="font-mono font-semibold text-gray-300">Shift + Enter</kbd>
-          for new line
-        </span>
+        {isStreaming ? (
+          <span className="inline-flex items-center gap-2 px-3 py-1 rounded bg-gray-800">
+            <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            <span className="text-red-400 font-medium">Streaming response...</span>
+          </span>
+        ) : (
+          <>
+            <span className="inline-flex items-center gap-1 px-2 py-1 rounded bg-gray-800">
+              <kbd className="font-mono font-semibold text-gray-300">Enter</kbd>
+              to send
+            </span>
+            <span className="text-gray-700">•</span>
+            <span className="inline-flex items-center gap-1 px-2 py-1 rounded bg-gray-800">
+              <kbd className="font-mono font-semibold text-gray-300">Shift + Enter</kbd>
+              for new line
+            </span>
+          </>
+        )}
       </div>
     </div>
   );

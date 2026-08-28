@@ -1,6 +1,6 @@
-import React, { createContext, useContext, useState, useCallback } from 'react';
+import React, { createContext, useContext, useState, useCallback, useRef } from 'react';
 import { conversationsApi, messagesApi } from '../services/api';
-import type { Conversation, Message } from '../types';
+import type { Conversation, Message, MessageRole } from '../types';
 
 /**
  * ChatContext - Global State Management
@@ -16,6 +16,11 @@ import type { Conversation, Message } from '../types';
  * Pattern: Context API + Custom Hook
  * - Context provides state to entire component tree
  * - Custom hook (useChatContext) makes it easy to consume
+ *
+ * STREAMING:
+ * - Added streamingMessage state for partial AI responses
+ * - Added isStreaming flag to disable input during streaming
+ * - sendMessage() now uses streaming by default
  */
 
 // ============================================================================
@@ -30,6 +35,8 @@ interface ChatContextType {
   loadingConversations: boolean;
   loadingMessages: boolean;
   sendingMessage: boolean;
+  isStreaming: boolean;  // NEW: True while streaming AI response
+  streamingMessage: string;  // NEW: Accumulated chunks of streaming response
   error: string | null;
 
   // ---- Actions ----
@@ -78,8 +85,15 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [sendingMessage, setSendingMessage] = useState(false);
 
+  // Streaming states (NEW)
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [streamingMessage, setStreamingMessage] = useState('');
+
   // Error message to show to user
   const [error, setError] = useState<string | null>(null);
+
+  // Ref to store cancel function for streaming
+  const cancelStreamRef = useRef<(() => void) | null>(null);
 
   // ---- Actions ----
 
@@ -123,6 +137,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       setLoadingMessages(true);
       setError(null);
       setSelectedConversationId(id);
+      setStreamingMessage(''); // Clear any streaming state
 
       console.log(`Selecting conversation ${id}...`);
       const data = await messagesApi.getByConversationId(id);
@@ -206,21 +221,17 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   }, [selectedConversationId, loadConversations]);
 
   /**
-   * Send a message in the current conversation
+   * Send a message in the current conversation with STREAMING
+   *
+   * NEW STREAMING BEHAVIOR:
+   * 1. Immediately add user message to UI (optimistic update)
+   * 2. Create placeholder for streaming assistant message
+   * 3. Start streaming from backend
+   * 4. Update placeholder as chunks arrive
+   * 5. Replace with final message when done
    *
    * Called when:
    * - User types message and clicks send
-   *
-   * What happens:
-   * 1. Backend saves user message
-   * 2. Backend calls OpenAI
-   * 3. Backend saves AI response
-   * 4. Backend returns ONLY the assistant message
-   * 5. We reload all messages to get both
-   * 6. Generate title from first message
-   *
-   * Note: Backend doesn't return both messages, so we reload
-   * the conversation to get the complete message history
    *
    * @param content - Message text
    */
@@ -233,49 +244,92 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
 
     try {
       setSendingMessage(true);
+      setIsStreaming(true);
+      setStreamingMessage('');
       setError(null);
 
-      console.log('Sending message...');
+      console.log('Sending message with streaming...');
 
       // Check if this is the first message (for title generation)
       const isFirstMessage = messages.length === 0;
 
-      const response = await messagesApi.send(selectedConversationId, { content });
+      // 1. Optimistically add user message to UI immediately
+      const tempUserMessage: Message = {
+        id: 'temp-user-' + Date.now(),
+        conversationId: selectedConversationId,
+        role: 'USER' as MessageRole,
+        content: content,
+        createdAt: new Date().toISOString(),
+      };
 
-      console.log('Message sent, received response:', response);
+      setMessages((prev) => [...prev, tempUserMessage]);
 
-      // Backend returns only the assistant message
-      // To get both user and assistant messages, we reload the conversation
-      const allMessages = await messagesApi.getByConversationId(selectedConversationId);
-      setMessages(allMessages);
+      // 2. Start streaming
+      let accumulatedContent = '';
 
-      // If this was the first message, generate a title from user's message
-      if (isFirstMessage) {
-        // Extract first 3-5 words or first 50 characters as title
-        const words = content.trim().split(/\s+/);
-        const title = words.slice(0, 5).join(' ');
-        const shortTitle = title.length > 50 ? title.substring(0, 47) + '...' : title;
+      const cancelStream = messagesApi.sendStream(
+        selectedConversationId,
+        { content },
+        // onChunk: Called for each chunk
+        (chunk) => {
+          accumulatedContent += chunk;
+          setStreamingMessage(accumulatedContent);
+        },
+        // onDone: Called when streaming completes
+        async (finalMessage) => {
+          console.log('Streaming completed, received final message:', finalMessage);
 
-        console.log('Generated title:', shortTitle);
+          // Clear streaming state
+          setIsStreaming(false);
+          setStreamingMessage('');
+          setSendingMessage(false);
 
-        // Update the conversation title in the backend
-        try {
-          await conversationsApi.update(selectedConversationId, { title: shortTitle });
-          console.log('Title updated in backend');
-        } catch (err) {
-          console.error('Error updating title:', err);
-          // Non-critical error, don't block the message flow
+          // Reload all messages to get both user and assistant messages from backend
+          const allMessages = await messagesApi.getByConversationId(selectedConversationId);
+          setMessages(allMessages);
+
+          // If this was the first message, generate a title
+          if (isFirstMessage) {
+            const words = content.trim().split(/\s+/);
+            const title = words.slice(0, 5).join(' ');
+            const shortTitle = title.length > 50 ? title.substring(0, 47) + '...' : title;
+
+            console.log('Generated title:', shortTitle);
+
+            try {
+              await conversationsApi.update(selectedConversationId, { title: shortTitle });
+              console.log('Title updated in backend');
+            } catch (err) {
+              console.error('Error updating title:', err);
+            }
+          }
+
+          // Reload conversations to get updated title and timestamp
+          await loadConversations();
+
+          console.log('Messages reloaded after streaming');
+        },
+        // onError: Called if an error occurs
+        (errorMessage) => {
+          console.error('Streaming error:', errorMessage);
+          setError('Failed to get response: ' + errorMessage);
+          setIsStreaming(false);
+          setStreamingMessage('');
+          setSendingMessage(false);
+
+          // Remove the optimistic user message on error
+          setMessages((prev) => prev.filter((m) => m.id !== tempUserMessage.id));
         }
-      }
+      );
 
-      // Reload conversations to get updated title
-      await loadConversations();
+      // Store cancel function in ref
+      cancelStreamRef.current = cancelStream;
 
-      console.log('Messages reloaded');
     } catch (err) {
       console.error('Error sending message:', err);
       setError('Failed to send message. Please try again.');
-    } finally {
+      setIsStreaming(false);
+      setStreamingMessage('');
       setSendingMessage(false);
     }
   }, [selectedConversationId, messages.length, loadConversations]);
@@ -306,6 +360,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     loadingConversations,
     loadingMessages,
     sendingMessage,
+    isStreaming,
+    streamingMessage,
     error,
 
     // Actions

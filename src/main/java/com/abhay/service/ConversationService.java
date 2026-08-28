@@ -15,15 +15,16 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
 
 /**
- * Conversation Service Implementation.
- * Implements IConversationService and handles all conversation management business logic. This service coordinates between repositories and
- * the OpenAI client to manage conversations, messages, and LLM interactions.
+ * Conversation Service Implementation. Implements IConversationService and handles all conversation management business logic. This service
+ * coordinates between repositories and the OpenAI client to manage conversations, messages, and LLM interactions.
  */
 @Service
 public class ConversationService implements IConversationService {
@@ -111,9 +112,10 @@ public class ConversationService implements IConversationService {
     }
 
     /**
-     * Send a message to a conversation and get AI response. This is the core method that: 1. Retrieves conversation history from database
-     * 2. Saves the user's message 3. Builds context for the LLM 4. Calls OpenAI API 5. Saves the assistant's response 6. Returns the
-     * assistant message
+     * Send a message to a conversation and get AI response.
+     * NON-STREAMING VERSION (original method - kept for compatibility)
+     * This is the core method that: 1. Retrieves conversation history from database 2. Saves the user's message 3. Builds context for the
+     * LLM 4. Calls OpenAI API 5. Saves the assistant's response 6. Returns the assistant message
      */
     @Transactional
     public MessageResponse sendMessage(Long conversationId, String content) {
@@ -148,6 +150,113 @@ public class ConversationService implements IConversationService {
 
         // 7. Return assistant message as DTO
         return mapToMessageResponse(savedAssistant);
+    }
+
+    /**
+     * Send a message to a conversation and stream the AI response.
+     * STREAMING VERSION (new method)
+     * This method: 1. Saves the user's message immediately 2. Retrieves conversation history 3. Calls OpenAI with streaming enabled 4.
+     * Forwards each chunk to the client via SSE 5. Accumulates the complete response 6. Saves the complete assistant message to the
+     * database 7. Sends completion event and closes the SSE connection
+     *
+     * @param conversationId
+     *         The conversation to send the message to
+     * @param content
+     *         The user's message content
+     * @param emitter
+     *         The SSE emitter to send chunks to the client
+     */
+    @Transactional
+    public void sendMessageStream(Long conversationId, String content, SseEmitter emitter) {
+        logger.info("Sending streaming message to conversation {}: {}", conversationId, content);
+
+        try {
+            // 1. Validate conversation exists
+            Conversation conversation = conversationRepository.findById(conversationId)
+                    .orElseThrow(() -> new ResourceNotFoundException("Conversation", "id", conversationId));
+
+            // 2. Save user message
+            Message userMessage = new Message(Message.Role.USER, content);
+            userMessage.setConversation(conversation);
+            messageRepository.save(userMessage);
+            logger.debug("Saved user message with id: {}", userMessage.getId());
+
+            // 3. Retrieve conversation history (including the user message we just saved)
+            List<Message> history = messageRepository.findByConversation_IdOrderByCreatedAtAsc(conversationId);
+            logger.debug("Retrieved {} messages from conversation history", history.size());
+
+            // 4. Build message list for OpenAI (transform entities to LLM format)
+            List<com.abhay.model.llm.Message> llmMessages = buildLLMMessages(history);
+
+            // 5. Accumulate the complete response as we stream
+            StringBuilder completeResponse = new StringBuilder();
+
+            // 6. Call OpenAI API with streaming
+            openAIClient.sendMessageStream(llmMessages,
+                    // onChunk: Called for each chunk of text
+                    chunk -> {
+                        try {
+                            // Accumulate the chunk
+                            completeResponse.append(chunk);
+
+                            // Send the chunk to the client via SSE
+                            emitter.send(SseEmitter.event().name("chunk").data(chunk));
+
+                            logger.debug("Sent chunk of length: {}", chunk.length());
+                        } catch (IOException e) {
+                            logger.error("Error sending chunk to client: {}", e.getMessage());
+                            emitter.completeWithError(e);
+                        }
+                    },
+                    // onComplete: Called when streaming finishes
+                    () -> {
+                        try {
+                            logger.info("Streaming completed. Total response length: {}", completeResponse.length());
+
+                            // 7. Save the complete assistant message to database
+                            Message assistantMessage = new Message(Message.Role.ASSISTANT, completeResponse.toString());
+                            assistantMessage.setConversation(conversation);
+                            Message savedAssistant = messageRepository.save(assistantMessage);
+                            logger.info("Saved complete assistant message with id: {}", savedAssistant.getId());
+
+                            // 8. Send completion event with the saved message
+                            MessageResponse response = mapToMessageResponse(savedAssistant);
+                            emitter.send(SseEmitter.event().name("done").data(response));
+
+                            // 9. Close the SSE connection
+                            emitter.complete();
+                            logger.info("SSE connection closed successfully");
+
+                        } catch (Exception e) {
+                            logger.error("Error completing streaming: {}", e.getMessage(), e);
+                            emitter.completeWithError(e);
+                        }
+                    },
+                    // onError: Called if an error occurs during streaming
+                    error -> {
+                        try {
+                            logger.error("Error during streaming: {}", error.getMessage(), error);
+
+                            // Send error event to client
+                            emitter.send(SseEmitter.event().name("error").data("Failed to get response from AI: " + error.getMessage()));
+
+                            emitter.completeWithError(error);
+                        } catch (IOException e) {
+                            logger.error("Error sending error event: {}", e.getMessage());
+                            emitter.completeWithError(e);
+                        }
+                    });
+
+        } catch (Exception e) {
+            logger.error("Error initiating streaming: {}", e.getMessage(), e);
+            try {
+                emitter.send(SseEmitter.event().name("error").data("Failed to initiate streaming: " + e.getMessage()));
+                emitter.completeWithError(e);
+            } catch (IOException ioException) {
+                logger.error("Error sending error event: {}", ioException.getMessage());
+                emitter.completeWithError(ioException);
+            }
+        }
     }
 
     /**
