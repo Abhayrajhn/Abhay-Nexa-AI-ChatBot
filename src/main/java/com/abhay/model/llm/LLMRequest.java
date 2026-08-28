@@ -21,6 +21,9 @@ public class LLMRequest {
     // Enable streaming responses
     private Boolean stream;
 
+    // Tool definitions (for tool calling)
+    private List<ToolDefinition> tools;
+
     // Constructors
     public LLMRequest() {
     }
@@ -78,5 +81,13 @@ public class LLMRequest {
 
     public void setStream(Boolean stream) {
         this.stream = stream;
+    }
+
+    public List<ToolDefinition> getTools() {
+        return tools;
+    }
+
+    public void setTools(List<ToolDefinition> tools) {
+        this.tools = tools;
     }
 }

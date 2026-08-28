@@ -127,6 +127,10 @@ public class StreamChunk {
         private String role;      // Only present in first chunk
         private String content;   // The actual text chunk
 
+        // Tool calls (for streaming tool call fragments)
+        @JsonProperty("tool_calls")
+        private List<ToolCallDelta> toolCalls;
+
         // Constructors
         public Delta() {
         }
@@ -146,6 +150,102 @@ public class StreamChunk {
 
         public void setContent(String content) {
             this.content = content;
+        }
+
+        public List<ToolCallDelta> getToolCalls() {
+            return toolCalls;
+        }
+
+        public void setToolCalls(List<ToolCallDelta> toolCalls) {
+            this.toolCalls = toolCalls;
+        }
+    }
+
+    /**
+     * Inner class: ToolCallDelta
+     * Represents a fragment of a tool call during streaming.
+     *
+     * OpenAI sends tool calls in pieces:
+     * - First chunk: index, id, type, name, arguments=""
+     * - Later chunks: index, arguments="fragment"
+     *
+     * We need to accumulate these fragments to build the complete tool call.
+     */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class ToolCallDelta {
+
+        private Integer index;   // Which tool call (0, 1, 2, ...)
+        private String id;       // Unique ID (only in first chunk)
+        private String type;     // "function" (only in first chunk)
+        private FunctionCallDelta function;
+
+        // Constructors
+        public ToolCallDelta() {
+        }
+
+        // Getters and Setters
+        public Integer getIndex() {
+            return index;
+        }
+
+        public void setIndex(Integer index) {
+            this.index = index;
+        }
+
+        public String getId() {
+            return id;
+        }
+
+        public void setId(String id) {
+            this.id = id;
+        }
+
+        public String getType() {
+            return type;
+        }
+
+        public void setType(String type) {
+            this.type = type;
+        }
+
+        public FunctionCallDelta getFunction() {
+            return function;
+        }
+
+        public void setFunction(FunctionCallDelta function) {
+            this.function = function;
+        }
+    }
+
+    /**
+     * Inner class: FunctionCallDelta
+     * Contains function name and argument fragments.
+     */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class FunctionCallDelta {
+
+        private String name;      // Function name (only in first chunk)
+        private String arguments; // Argument fragment
+
+        // Constructors
+        public FunctionCallDelta() {
+        }
+
+        // Getters and Setters
+        public String getName() {
+            return name;
+        }
+
+        public void setName(String name) {
+            this.name = name;
+        }
+
+        public String getArguments() {
+            return arguments;
+        }
+
+        public void setArguments(String arguments) {
+            this.arguments = arguments;
         }
     }
 }
