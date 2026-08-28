@@ -97,6 +97,10 @@ public class LLMResponse {
         @JsonProperty("finish_reason")
         private String finishReason;
 
+        // Tool calls (present when LLM wants to call tools)
+        @JsonProperty("tool_calls")
+        private List<ToolCall> toolCalls;
+
         // Constructors
         public Choice() {
         }
@@ -130,6 +134,14 @@ public class LLMResponse {
 
         public void setFinishReason(String finishReason) {
             this.finishReason = finishReason;
+        }
+
+        public List<ToolCall> getToolCalls() {
+            return toolCalls;
+        }
+
+        public void setToolCalls(List<ToolCall> toolCalls) {
+            this.toolCalls = toolCalls;
         }
     }
 
