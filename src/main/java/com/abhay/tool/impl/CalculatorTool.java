@@ -11,11 +11,9 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Calculator Tool
- * Performs safe mathematical calculations. Supports: +, -, *, /, %, parentheses, and decimal numbers.
- * SECURITY: Uses manual expression parser (no eval/ScriptEngine). Only mathematical operations are allowed - no code execution.
- * Example usage: User: "What is 25 * 40?" LLM calls: calculator({ "expression": "25 * 40" }) Tool returns: { "result": 1000 } LLM responds:
- * "25 * 40 equals 1000"
+ * Calculator Tool Performs safe mathematical calculations. Supports: +, -, *, /, %, parentheses, and decimal numbers. SECURITY: Uses manual
+ * expression parser (no eval/ScriptEngine). Only mathematical operations are allowed - no code execution. Example usage: User: "What is 25
+ * * 40?" LLM calls: calculator({ "expression": "25 * 40" }) Tool returns: { "result": 1000 } LLM responds: "25 * 40 equals 1000"
  */
 @Component
 public class CalculatorTool implements Tool {
@@ -81,9 +79,9 @@ public class CalculatorTool implements Tool {
     }
 
     /**
-     * Safe expression evaluator
-     * Simple recursive descent parser for mathematical expressions. Supports: +, -, *, /, %, parentheses, decimal numbers.
-     * Grammar: expression = term (('+' | '-') term)* term = factor (('*' | '/' | '%') factor)* factor = number | '(' expression ')'
+     * Safe expression evaluator Simple recursive descent parser for mathematical expressions. Supports: +, -, *, /, %, parentheses, decimal
+     * numbers. Grammar: expression = term (('+' | '-') term)* term = factor (('*' | '/' | '%') factor)* factor = number | '(' expression
+     * ')'
      */
     private double evaluateExpression(String expression) throws ToolExecutionException {
         // Remove all whitespace
