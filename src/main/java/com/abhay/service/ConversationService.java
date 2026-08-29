@@ -10,6 +10,10 @@ import com.abhay.model.dto.MessageResponse;
 import com.abhay.model.llm.LLMResponse;
 import com.abhay.model.llm.ToolCall;
 import com.abhay.model.llm.ToolDefinition;
+import com.abhay.planning.Plan;
+import com.abhay.planning.PlanExecutor;
+import com.abhay.planning.PlanStep;
+import com.abhay.planning.Planner;
 import com.abhay.repository.ConversationRepository;
 import com.abhay.repository.MessageRepository;
 import com.abhay.tool.ToolExecutor;
@@ -48,6 +52,12 @@ public class ConversationService implements IConversationService {
 
     @Autowired
     private OpenAIClient openAIClient;
+
+    @Autowired
+    private Planner planner;
+
+    @Autowired
+    private PlanExecutor planExecutor;
 
     @Autowired
     private ToolRegistry toolRegistry;
@@ -204,69 +214,18 @@ public class ConversationService implements IConversationService {
             List<ToolDefinition> toolDefinitions = toolRegistry.getAllDefinitions();
             logger.info("Available tools: {}", toolRegistry.getToolCount());
 
-            // 6. Accumulate the complete response as we stream
-            StringBuilder completeResponse = new StringBuilder();
-            AtomicReference<List<ToolCall>> toolCallsRef = new AtomicReference<>();
-
-            // 7. Call OpenAI API with streaming and tool support
-            openAIClient.sendMessageStream(llmMessages, toolDefinitions,
-                    // onChunk: Called for each chunk of text
-                    chunk -> {
-                        try {
-                            // Accumulate the chunk
-                            completeResponse.append(chunk);
-
-                            // Send the chunk to the client via SSE
-                            emitter.send(SseEmitter.event().name("chunk").data(chunk));
-
-                            logger.debug("Sent chunk of length: {}", chunk.length());
-                        } catch (IOException e) {
-                            logger.error("Error sending chunk to client: {}", e.getMessage());
-                            emitter.completeWithError(e);
-                        }
-                    },
-                    // onToolCalls: Called when LLM requests tools
-                    toolCalls -> {
-                        logger.info("LLM requested {} tools", toolCalls.size());
-                        toolCallsRef.set(toolCalls);
-                    },
-                    // onComplete: Called when streaming finishes
-                    () -> {
-                        try {
-                            List<ToolCall> toolCalls = toolCallsRef.get();
-
-                            if (toolCalls != null && !toolCalls.isEmpty()) {
-                                // TOOL EXECUTION PATH
-                                // Run in separate thread to avoid blocking reactive context
-                                logger.info("Handling tool execution for {} tool calls", toolCalls.size());
-                                CompletableFuture.runAsync(() -> {
-                                    handleToolExecution(llmMessages, toolCalls, toolDefinitions, emitter, conversation);
-                                });
-                            } else {
-                                // NORMAL RESPONSE PATH (no tools needed)
-                                logger.info("Streaming completed. Total response length: {}", completeResponse.length());
-                                saveAndCompleteResponse(completeResponse.toString(), emitter, conversation);
-                            }
-
-                        } catch (Exception e) {
-                            logger.error("Error completing streaming: {}", e.getMessage(), e);
-                            emitter.completeWithError(e);
-                        }
-                    },
-                    // onError: Called if an error occurs during streaming
-                    error -> {
-                        try {
-                            logger.error("Error during streaming: {}", error.getMessage(), error);
-
-                            // Send error event to client
-                            emitter.send(SseEmitter.event().name("error").data("Failed to get response from AI: " + error.getMessage()));
-
-                            emitter.completeWithError(error);
-                        } catch (IOException e) {
-                            logger.error("Error sending error event: {}", e.getMessage());
-                            emitter.completeWithError(e);
-                        }
-                    });
+            // 6. DECISION POINT: Does this request need planning?
+            if (planner.needsPlanning(content)) {
+                // PLANNING FLOW (NEW)
+                logger.info("Using PLANNING flow for request");
+                CompletableFuture.runAsync(() -> {
+                    handlePlanningFlow(content, llmMessages, emitter, conversation);
+                });
+            } else {
+                // TOOL CALLING FLOW (EXISTING)
+                logger.info("Using TOOL CALLING flow for request");
+                handleToolCallingFlow(llmMessages, toolDefinitions, emitter, conversation);
+            }
 
         } catch (Exception e) {
             logger.error("Error initiating streaming: {}", e.getMessage(), e);
@@ -458,5 +417,142 @@ public class ConversationService implements IConversationService {
     private MessageResponse mapToMessageResponse(Message entity) {
         return new MessageResponse(entity.getId(), entity.getRole().name(),  // Enum → String
                 entity.getContent(), entity.getCreatedAt());
+    }
+
+    /**
+     * Handle planning flow for complex multi-step requests.
+     * Flow: 1. Generate plan using Planner 2. Execute plan using PlanExecutor 3. Build context from plan results 4. Get final response from
+     * LLM 5. Stream final response to client 6. Save and complete
+     */
+    private void handlePlanningFlow(String content, List<com.abhay.model.llm.Message> llmMessages, SseEmitter emitter,
+            Conversation conversation) {
+        try {
+            logger.info("Starting planning flow for request: {}", content);
+
+            // 1. Notify frontend: planning started
+            emitter.send(SseEmitter.event().name("planning_start").data(Map.of("status", "Analyzing request and creating plan")));
+
+            // 2. Generate plan
+            Plan plan = planner.createPlan(content, llmMessages);
+            logger.info("Plan created with {} steps", plan.getStepCount());
+
+            // 3. Notify frontend: plan created
+            emitter.send(SseEmitter.event().name("plan_created")
+                    .data(Map.of("steps", plan.getStepCount(), "description", plan.getDescription())));
+
+            // 4. Execute plan
+            logger.info("Executing plan...");
+            Map<String, Object> results = planExecutor.executePlan(plan);
+            logger.info("Plan executed successfully");
+
+            // 5. Notify frontend: execution complete
+            emitter.send(SseEmitter.event().name("plan_executed").data(Map.of("status", "Plan executed successfully")));
+
+            // 6. Build context for final response
+            StringBuilder planContext = new StringBuilder();
+            planContext.append("I executed a plan to complete your request. Here are the results:\n\n");
+
+            for (PlanStep step : plan.getSteps()) {
+                planContext.append("Step ").append(step.getStepNumber()).append(": ").append(step.getDescription()).append("\n");
+                planContext.append("Tool used: ").append(step.getToolName()).append("\n");
+                planContext.append("Result: ").append(step.getResult()).append("\n\n");
+            }
+
+            // 7. Get final response from LLM
+            logger.info("Generating final natural language response...");
+            llmMessages.add(new com.abhay.model.llm.Message("assistant", planContext.toString()));
+            llmMessages.add(new com.abhay.model.llm.Message("system",
+                    "Based on the plan execution results above, provide a clear, natural language response to the user's original request. "
+                            + "Be concise and focus on answering what they asked."));
+
+            String finalResponse = openAIClient.sendMessage(llmMessages);
+            logger.info("Final response generated, length: {}", finalResponse.length());
+
+            // 8. Stream final response (send as chunks for consistency)
+            emitter.send(SseEmitter.event().name("chunk").data(finalResponse));
+
+            // 9. Save and complete
+            saveAndCompleteResponse(finalResponse, emitter, conversation);
+
+        } catch (Exception e) {
+            logger.error("Error during planning flow: {}", e.getMessage(), e);
+            try {
+                emitter.send(SseEmitter.event().name("error").data("Planning failed: " + e.getMessage()));
+                emitter.completeWithError(e);
+            } catch (IOException ioException) {
+                logger.error("Error sending error event: {}", ioException.getMessage());
+                emitter.completeWithError(ioException);
+            }
+        }
+    }
+
+    /**
+     * Handle tool calling flow for simple requests. This is the EXISTING flow, extracted to a separate method.
+     */
+    private void handleToolCallingFlow(List<com.abhay.model.llm.Message> llmMessages, List<ToolDefinition> toolDefinitions,
+            SseEmitter emitter, Conversation conversation) {
+        // Accumulate the complete response as we stream
+        StringBuilder completeResponse = new StringBuilder();
+        AtomicReference<List<ToolCall>> toolCallsRef = new AtomicReference<>();
+
+        // Call OpenAI API with streaming and tool support
+        openAIClient.sendMessageStream(llmMessages, toolDefinitions,
+                // onChunk: Called for each chunk of text
+                chunk -> {
+                    try {
+                        // Accumulate the chunk
+                        completeResponse.append(chunk);
+
+                        // Send the chunk to the client via SSE
+                        emitter.send(SseEmitter.event().name("chunk").data(chunk));
+
+                        logger.debug("Sent chunk of length: {}", chunk.length());
+                    } catch (IOException e) {
+                        logger.error("Error sending chunk to client: {}", e.getMessage());
+                        emitter.completeWithError(e);
+                    }
+                },
+                // onToolCalls: Called when LLM requests tools
+                toolCalls -> {
+                    logger.info("LLM requested {} tools", toolCalls.size());
+                    toolCallsRef.set(toolCalls);
+                },
+                // onComplete: Called when streaming finishes
+                () -> {
+                    try {
+                        List<ToolCall> toolCalls = toolCallsRef.get();
+
+                        if (toolCalls != null && !toolCalls.isEmpty()) {
+                            // TOOL EXECUTION PATH
+                            // Run in separate thread to avoid blocking reactive context
+                            logger.info("Handling tool execution for {} tool calls", toolCalls.size());
+                            CompletableFuture.runAsync(() -> {
+                                handleToolExecution(llmMessages, toolCalls, toolDefinitions, emitter, conversation);
+                            });
+                        } else {
+                            // NORMAL RESPONSE PATH (no tools needed)
+                            logger.info("Streaming completed. Total response length: {}", completeResponse.length());
+                            saveAndCompleteResponse(completeResponse.toString(), emitter, conversation);
+                        }
+
+                    } catch (Exception e) {
+                        logger.error("Error completing streaming: {}", e.getMessage(), e);
+                        emitter.completeWithError(e);
+                    }
+                },
+                // onError: Called if an error occurs during streaming
+                error -> {
+                    try {
+                        logger.error("Error during streaming: {}", error.getMessage(), error);
+
+                        // Send error event to client
+                        emitter.send(SseEmitter.event().name("error").data("Failed to get response from AI: " + error.getMessage()));
+
+                        emitter.completeWithError(error);
+                    } catch (IOException e) {
+                        logger.error("Error sending error event: {}", e.getMessage());
+                        emitter.completeWithError(e);
+                    }
+                });
     }
 }
