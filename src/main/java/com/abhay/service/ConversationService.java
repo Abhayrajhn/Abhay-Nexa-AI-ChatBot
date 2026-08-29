@@ -3,7 +3,12 @@ package com.abhay.service;
 import com.abhay.client.OpenAIClient;
 import com.abhay.entity.Conversation;
 import com.abhay.entity.Message;
+import com.abhay.entity.User;
+import com.abhay.entity.LongTermMemory;
 import com.abhay.exception.ResourceNotFoundException;
+import com.abhay.memory.MemoryExtractor;
+import com.abhay.memory.MemoryRetriever;
+import com.abhay.memory.WorkingMemory;
 import com.abhay.model.dto.ConversationResponse;
 import com.abhay.model.dto.CreateConversationRequest;
 import com.abhay.model.dto.MessageResponse;
@@ -16,6 +21,8 @@ import com.abhay.planning.PlanStep;
 import com.abhay.planning.Planner;
 import com.abhay.repository.ConversationRepository;
 import com.abhay.repository.MessageRepository;
+import com.abhay.repository.UserRepository;
+import com.abhay.repository.LongTermMemoryRepository;
 import com.abhay.tool.ToolExecutor;
 import com.abhay.tool.ToolRegistry;
 import org.slf4j.Logger;
@@ -31,6 +38,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
@@ -65,6 +73,18 @@ public class ConversationService implements IConversationService {
     @Autowired
     private ToolExecutor toolExecutor;
 
+    @Autowired
+    private UserRepository userRepository;
+
+    @Autowired
+    private LongTermMemoryRepository longTermMemoryRepository;
+
+    @Autowired
+    private MemoryExtractor memoryExtractor;
+
+    @Autowired
+    private MemoryRetriever memoryRetriever;
+
     @Value("${openai.system.message}")
     private String systemMessage;
 
@@ -73,10 +93,23 @@ public class ConversationService implements IConversationService {
      */
     @Transactional
     public ConversationResponse createConversation(CreateConversationRequest request) {
-        logger.info("Creating new conversation with title: {}", request.getTitle());
+        logger.info("Creating new conversation with title: {} for userId: {}", request.getTitle(), request.getUserId());
 
+        // Validate userId is provided
+        if (request.getUserId() == null) {
+            throw new IllegalArgumentException("userId is required to create a conversation");
+        }
+
+        // Get user entity
+        User user = userRepository.findById(request.getUserId())
+                .orElseThrow(() -> new ResourceNotFoundException("User", "id", request.getUserId()));
+
+        // Create conversation and associate with user
         Conversation conversation = new Conversation(request.getTitle());
+        conversation.setUser(user);
         Conversation saved = conversationRepository.save(conversation);
+
+        logger.info("Created conversation {} for user {}", saved.getId(), user.getUsername());
 
         return mapToConversationResponse(saved, false);
     }
@@ -189,13 +222,28 @@ public class ConversationService implements IConversationService {
      *         The SSE emitter to send chunks to the client
      */
     @Transactional
-    public void sendMessageStream(Long conversationId, String content, SseEmitter emitter) {
-        logger.info("Sending streaming message to conversation {}: {}", conversationId, content);
+    public void sendMessageStream(Long conversationId, Long userId, String content, SseEmitter emitter) {
+        logger.info("Sending streaming message to conversation {} from user {}: {}", conversationId, userId, content);
 
         try {
-            // 1. Validate conversation exists
+            // 1. Validate conversation exists and belongs to user
             Conversation conversation = conversationRepository.findById(conversationId)
                     .orElseThrow(() -> new ResourceNotFoundException("Conversation", "id", conversationId));
+
+            // 1b. Validate userId is provided
+            if (userId == null) {
+                throw new IllegalArgumentException("userId is required");
+            }
+
+            // 1c. Get user entity
+            User user = userRepository.findById(userId).orElseThrow(() -> new ResourceNotFoundException("User", "id", userId));
+
+            // 1d. Validate conversation belongs to user
+            if (!conversation.getUser().getId().equals(userId)) {
+                throw new SecurityException("Conversation does not belong to user");
+            }
+
+            logger.info("Processing message from user {} in conversation {}", user.getUsername(), conversationId);
 
             // 2. Save user message
             Message userMessage = new Message(Message.Role.USER, content);
@@ -207,24 +255,29 @@ public class ConversationService implements IConversationService {
             List<Message> history = messageRepository.findByConversation_IdOrderByCreatedAtAsc(conversationId);
             logger.debug("Retrieved {} messages from conversation history", history.size());
 
-            // 4. Build message list for OpenAI (transform entities to LLM format)
-            List<com.abhay.model.llm.Message> llmMessages = buildLLMMessages(history);
+            // 4. MEMORY INTEGRATION: Retrieve relevant long-term memories
+            List<LongTermMemory> relevantMemories = memoryRetriever.retrieveRelevantMemories(userId, content, 10  // Max 10 memories
+            );
+            logger.info("Retrieved {} relevant memories for user {}", relevantMemories.size(), userId);
 
-            // 5. Get available tools
+            // 5. Build message list for OpenAI with memory context
+            List<com.abhay.model.llm.Message> llmMessages = buildLLMMessagesWithMemory(history, relevantMemories);
+
+            // 6. Get available tools
             List<ToolDefinition> toolDefinitions = toolRegistry.getAllDefinitions();
             logger.info("Available tools: {}", toolRegistry.getToolCount());
 
-            // 6. DECISION POINT: Does this request need planning?
+            // 7. DECISION POINT: Does this request need planning?
             if (planner.needsPlanning(content)) {
                 // PLANNING FLOW (NEW)
                 logger.info("Using PLANNING flow for request");
                 CompletableFuture.runAsync(() -> {
-                    handlePlanningFlow(content, llmMessages, emitter, conversation);
+                    handlePlanningFlow(content, llmMessages, emitter, conversation, user);
                 });
             } else {
                 // TOOL CALLING FLOW (EXISTING)
                 logger.info("Using TOOL CALLING flow for request");
-                handleToolCallingFlow(llmMessages, toolDefinitions, emitter, conversation);
+                handleToolCallingFlow(llmMessages, toolDefinitions, emitter, conversation, user);
             }
 
         } catch (Exception e) {
@@ -254,9 +307,11 @@ public class ConversationService implements IConversationService {
      *         SSE emitter for client communication
      * @param conversation
      *         Database conversation entity
+     * @param user
+     *         User entity for memory extraction
      */
     private void handleToolExecution(List<com.abhay.model.llm.Message> llmMessages, List<ToolCall> toolCalls,
-            List<ToolDefinition> toolDefinitions, SseEmitter emitter, Conversation conversation) {
+            List<ToolDefinition> toolDefinitions, SseEmitter emitter, Conversation conversation, User user) {
         try {
             // 1. Notify frontend: tools are executing
             emitter.send(SseEmitter.event().name("tool_execution_start").data(Map.of("count", toolCalls.size())));
@@ -310,7 +365,11 @@ public class ConversationService implements IConversationService {
             logger.info("Received final response from OpenAI. Length: {}", finalContent.length());
 
             // 7. Save and complete
-            saveAndCompleteResponse(finalContent, emitter, conversation);
+            saveAndCompleteResponse(finalContent, emitter, conversation, user,
+                    llmMessages.stream().filter(m -> "user".equals(m.getRole())).reduce((first, second) -> second)
+                            .map(com.abhay.model.llm.Message::getContent).orElse(""));
+
+            // Note: Memory extraction now happens inside saveAndCompleteResponse
 
         } catch (Exception e) {
             logger.error("Error during tool execution: {}", e.getMessage(), e);
@@ -333,8 +392,13 @@ public class ConversationService implements IConversationService {
      *         SSE emitter
      * @param conversation
      *         Database conversation entity
+     * @param user
+     *         User entity for memory extraction
+     * @param userMessage
+     *         The user's message content
      */
-    private void saveAndCompleteResponse(String content, SseEmitter emitter, Conversation conversation) throws IOException {
+    private void saveAndCompleteResponse(String content, SseEmitter emitter, Conversation conversation, User user, String userMessage)
+            throws IOException {
 
         // Save the complete assistant message to database
         Message assistantMessage = new Message(Message.Role.ASSISTANT, content);
@@ -349,6 +413,15 @@ public class ConversationService implements IConversationService {
         // Close the SSE connection
         emitter.complete();
         logger.info("SSE connection closed successfully");
+
+        // MEMORY INTEGRATION: Extract and store memories (async, non-blocking)
+        CompletableFuture.runAsync(() -> {
+            try {
+                extractAndStoreMemories(userMessage, content, user, conversation.getId());
+            } catch (Exception memEx) {
+                logger.error("Failed to extract memories (non-critical): {}", memEx.getMessage());
+            }
+        });
     }
 
     /**
@@ -391,6 +464,36 @@ public class ConversationService implements IConversationService {
     }
 
     /**
+     * Build LLM messages with memory context prepended. This is the memory-aware version that includes user's long-term memories.
+     *
+     * @param history
+     *         Conversation history
+     * @param memories
+     *         Relevant long-term memories
+     * @return List of messages including system prompt, memory context, and history
+     */
+    private List<com.abhay.model.llm.Message> buildLLMMessagesWithMemory(List<Message> history, List<LongTermMemory> memories) {
+        List<com.abhay.model.llm.Message> llmMessages = new ArrayList<>();
+
+        // 1. System message (as before)
+        llmMessages.add(new com.abhay.model.llm.Message("system", systemMessage));
+
+        // 2. Memory context
+        if (memories != null && !memories.isEmpty()) {
+            String memoryContext = memoryRetriever.formatMemoriesAsContext(memories);
+            llmMessages.add(new com.abhay.model.llm.Message("system", memoryContext));
+            logger.debug("Added memory context with {} memories", memories.size());
+        }
+
+        // 3. Conversation history (as before)
+        for (Message msg : history) {
+            llmMessages.add(new com.abhay.model.llm.Message(msg.getRole().toString().toLowerCase(), msg.getContent()));
+        }
+
+        return llmMessages;
+    }
+
+    /**
      * Map Conversation entity to ConversationResponse DTO.
      *
      * @param includeMessages
@@ -420,12 +523,11 @@ public class ConversationService implements IConversationService {
     }
 
     /**
-     * Handle planning flow for complex multi-step requests.
-     * Flow: 1. Generate plan using Planner 2. Execute plan using PlanExecutor 3. Build context from plan results 4. Get final response from
-     * LLM 5. Stream final response to client 6. Save and complete
+     * Handle planning flow for complex multi-step requests. Flow: 1. Generate plan using Planner 2. Execute plan using PlanExecutor 3.
+     * Build context from plan results 4. Get final response from LLM 5. Stream final response to client 6. Save and complete
      */
     private void handlePlanningFlow(String content, List<com.abhay.model.llm.Message> llmMessages, SseEmitter emitter,
-            Conversation conversation) {
+            Conversation conversation, User user) {
         try {
             logger.info("Starting planning flow for request: {}", content);
 
@@ -472,7 +574,9 @@ public class ConversationService implements IConversationService {
             emitter.send(SseEmitter.event().name("chunk").data(finalResponse));
 
             // 9. Save and complete
-            saveAndCompleteResponse(finalResponse, emitter, conversation);
+            saveAndCompleteResponse(finalResponse, emitter, conversation, user, content);
+
+            // Note: Memory extraction now happens inside saveAndCompleteResponse
 
         } catch (Exception e) {
             logger.error("Error during planning flow: {}", e.getMessage(), e);
@@ -490,10 +594,14 @@ public class ConversationService implements IConversationService {
      * Handle tool calling flow for simple requests. This is the EXISTING flow, extracted to a separate method.
      */
     private void handleToolCallingFlow(List<com.abhay.model.llm.Message> llmMessages, List<ToolDefinition> toolDefinitions,
-            SseEmitter emitter, Conversation conversation) {
+            SseEmitter emitter, Conversation conversation, User user) {
         // Accumulate the complete response as we stream
         StringBuilder completeResponse = new StringBuilder();
         AtomicReference<List<ToolCall>> toolCallsRef = new AtomicReference<>();
+
+        // Extract user message content for memory extraction later
+        final String userMessageContent = llmMessages.stream().filter(m -> "user".equals(m.getRole())).reduce((first, second) -> second)
+                .map(com.abhay.model.llm.Message::getContent).orElse("");
 
         // Call OpenAI API with streaming and tool support
         openAIClient.sendMessageStream(llmMessages, toolDefinitions,
@@ -527,12 +635,12 @@ public class ConversationService implements IConversationService {
                             // Run in separate thread to avoid blocking reactive context
                             logger.info("Handling tool execution for {} tool calls", toolCalls.size());
                             CompletableFuture.runAsync(() -> {
-                                handleToolExecution(llmMessages, toolCalls, toolDefinitions, emitter, conversation);
+                                handleToolExecution(llmMessages, toolCalls, toolDefinitions, emitter, conversation, user);
                             });
                         } else {
                             // NORMAL RESPONSE PATH (no tools needed)
                             logger.info("Streaming completed. Total response length: {}", completeResponse.length());
-                            saveAndCompleteResponse(completeResponse.toString(), emitter, conversation);
+                            saveAndCompleteResponse(completeResponse.toString(), emitter, conversation, user, userMessageContent);
                         }
 
                     } catch (Exception e) {
@@ -554,5 +662,55 @@ public class ConversationService implements IConversationService {
                         emitter.completeWithError(e);
                     }
                 });
+    }
+
+    /**
+     * Extract and store memories from conversation. This is called after the assistant response is generated. Uses MemoryExtractor to
+     * identify memorable information and stores it in the database.
+     *
+     * @param userMessage
+     *         The user's message
+     * @param assistantResponse
+     *         The assistant's response
+     * @param user
+     *         The user entity
+     * @param conversationId
+     *         The conversation ID
+     */
+    private void extractAndStoreMemories(String userMessage, String assistantResponse, User user, Long conversationId) {
+        try {
+            logger.info("Extracting memories from conversation {}", conversationId);
+
+            List<LongTermMemory> extractedMemories = memoryExtractor.extractMemories(userMessage, assistantResponse, user, conversationId);
+
+            if (!extractedMemories.isEmpty()) {
+                logger.info("Storing {} new memories", extractedMemories.size());
+
+                for (LongTermMemory memory : extractedMemories) {
+                    // Check if memory with same key already exists
+                    Optional<LongTermMemory> existing = longTermMemoryRepository.findByUser_IdAndKey(user.getId(), memory.getKey());
+
+                    if (existing.isPresent()) {
+                        // Update existing memory
+                        LongTermMemory existingMemory = existing.get();
+                        existingMemory.setValue(memory.getValue());
+                        existingMemory.setConfidence(memory.getConfidence());
+                        existingMemory.setTags(memory.getTags());
+                        longTermMemoryRepository.save(existingMemory);
+                        logger.info("Updated existing memory: {}", memory.getKey());
+                    } else {
+                        // Save new memory
+                        longTermMemoryRepository.save(memory);
+                        logger.info("Stored new memory: {}", memory.getKey());
+                    }
+                }
+            } else {
+                logger.debug("No memorable information found in this conversation");
+            }
+
+        } catch (Exception e) {
+            logger.error("Failed to extract/store memories: {}", e.getMessage(), e);
+            // Don't fail the request if memory extraction fails
+        }
     }
 }

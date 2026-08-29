@@ -26,6 +26,11 @@ public class Conversation {
     @Column(name = "updated_at")
     private LocalDateTime updatedAt;
 
+    // Many conversations belong to one user
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "user_id", nullable = false)
+    private User user;
+
     // One conversation has many messages
     // cascade = ALL: When we save/delete conversation, messages are also saved/deleted
     // orphanRemoval = true: If a message is removed from the list, delete it from DB
@@ -105,5 +110,13 @@ public class Conversation {
 
     public void setMessages(List<Message> messages) {
         this.messages = messages;
+    }
+
+    public User getUser() {
+        return user;
+    }
+
+    public void setUser(User user) {
+        this.user = user;
     }
 }

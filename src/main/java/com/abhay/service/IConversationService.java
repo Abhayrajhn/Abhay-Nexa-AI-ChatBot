@@ -45,7 +45,7 @@ public interface IConversationService {
     /**
      * Send a message to a conversation and stream the AI response. STREAMING VERSION
      */
-    void sendMessageStream(Long conversationId, String content, SseEmitter emitter);
+    void sendMessageStream(Long conversationId, Long userId, String content, SseEmitter emitter);
 
     /**
      * Get all messages for a conversation.
