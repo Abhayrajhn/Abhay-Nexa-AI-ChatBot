@@ -25,10 +25,12 @@ export interface Message {
 // API Request/Response types
 export interface CreateConversationRequest {
   title?: string;
+  userId?: number;  // Optional for now (will be required when auth is implemented)
 }
 
 export interface SendMessageRequest {
   content: string;
+  userId?: number;  // Optional for now (will be required when auth is implemented)
 }
 
 // Backend only returns the assistant message

@@ -170,7 +170,11 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       setError(null);
 
       console.log('Creating new conversation...');
-      const newConversation = await conversationsApi.create({ title });
+      // MEMORY SYSTEM: Pass userId (hardcoded to 1 for now, until authentication is implemented)
+      const newConversation = await conversationsApi.create({
+        title,
+        userId: 1  // TODO: Get from authentication context when implemented
+      });
 
       console.log(`Created conversation: ${newConversation.id}`);
 
@@ -269,7 +273,10 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
 
       const cancelStream = messagesApi.sendStream(
         selectedConversationId,
-        { content },
+        {
+          content,
+          userId: 1  // TODO: Get from authentication context when implemented
+        },
         // onChunk: Called for each chunk
         (chunk) => {
           accumulatedContent += chunk;

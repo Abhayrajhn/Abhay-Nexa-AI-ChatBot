@@ -37,7 +37,13 @@ public class ConversationController implements IConversationAPI {
 
     @Override
     public ResponseEntity<ConversationResponse> createConversation(CreateConversationRequest request) {
-        logger.info("POST /api/conversations - Creating conversation with title: {}", request.getTitle());
+        logger.info("POST /api/conversations - Creating conversation with title: {} for userId: {}", request.getTitle(),
+                request.getUserId());
+
+        // Validate userId is provided
+        if (request.getUserId() == null) {
+            throw new IllegalArgumentException("userId is required to create a conversation");
+        }
 
         ConversationResponse response = conversationService.createConversation(request);
 
@@ -94,7 +100,12 @@ public class ConversationController implements IConversationAPI {
      */
     @Override
     public SseEmitter sendMessageStream(Long id, SendMessageRequest request) {
-        logger.info("POST /api/conversations/{}/messages/stream - Sending message (streaming)", id);
+        logger.info("POST /api/conversations/{}/messages/stream - Sending message (streaming) for userId: {}", id, request.getUserId());
+
+        // Validate userId is provided
+        if (request.getUserId() == null) {
+            throw new IllegalArgumentException("userId is required to send a message");
+        }
 
         // Create SSE emitter with 5-minute timeout
         // This timeout is how long the connection can stay open
@@ -120,7 +131,7 @@ public class ConversationController implements IConversationAPI {
         // The service will handle sending chunks through the emitter
         new Thread(() -> {
             try {
-                conversationService.sendMessageStream(id, request.getContent(), emitter);
+                conversationService.sendMessageStream(id, request.getUserId(), request.getContent(), emitter);
             } catch (Exception e) {
                 logger.error("Error in streaming thread: {}", e.getMessage(), e);
                 emitter.completeWithError(e);
@@ -161,6 +172,36 @@ public class ConversationController implements IConversationAPI {
         error.put("message", ex.getMessage());
 
         return ResponseEntity.status(HttpStatus.NOT_FOUND).body(error);
+    }
+
+    /**
+     * Exception handler for IllegalArgumentException (e.g., missing userId). Converts IllegalArgumentException to HTTP 400 with error
+     * message.
+     */
+    @ExceptionHandler(IllegalArgumentException.class)
+    public ResponseEntity<Map<String, String>> handleIllegalArgument(IllegalArgumentException ex) {
+        logger.warn("Bad request: {}", ex.getMessage());
+
+        Map<String, String> error = new HashMap<>();
+        error.put("error", "Bad Request");
+        error.put("message", ex.getMessage());
+
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(error);
+    }
+
+    /**
+     * Exception handler for SecurityException (e.g., conversation doesn't belong to user). Converts SecurityException to HTTP 403 with
+     * error message.
+     */
+    @ExceptionHandler(SecurityException.class)
+    public ResponseEntity<Map<String, String>> handleSecurityException(SecurityException ex) {
+        logger.warn("Access denied: {}", ex.getMessage());
+
+        Map<String, String> error = new HashMap<>();
+        error.put("error", "Forbidden");
+        error.put("message", ex.getMessage());
+
+        return ResponseEntity.status(HttpStatus.FORBIDDEN).body(error);
     }
 
     /**
