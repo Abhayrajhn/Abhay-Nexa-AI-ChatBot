@@ -627,7 +627,15 @@ public class ConversationService implements IConversationService {
 
             // Execute the agent loop
             // The agent will iterate through DECIDE → ACT → OBSERVE until complete
-            AgentResult result = agentRuntime.executeAgentLoop(userRequest, llmMessages, emitter);
+            AgentResult result = agentRuntime.executeAgentLoop(userRequest, llmMessages, emitter, user, conversation.getId());
+
+            // Check if agent is waiting for approval
+            if (result.isPendingApproval()) {
+                logger.info("Agent paused - waiting for approval: {}", result.getApprovalId());
+                // Don't save message or complete emitter
+                // The approval flow will handle completion
+                return;
+            }
 
             if (!result.isSuccess()) {
                 // Agent loop failed (max iterations or error)

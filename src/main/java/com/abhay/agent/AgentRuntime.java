@@ -1,8 +1,12 @@
 package com.abhay.agent;
 
+import com.abhay.approval.ApprovalRequest;
+import com.abhay.approval.ApprovalRepository;
 import com.abhay.client.OpenAIClient;
+import com.abhay.entity.User;
 import com.abhay.model.llm.Message;
 import com.abhay.model.llm.ToolDefinition;
+import com.abhay.tool.Tool;
 import com.abhay.tool.ToolExecutor;
 import com.abhay.tool.ToolRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -16,8 +20,10 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 /**
  * Agent Runtime - Core orchestrator for the DECIDE → ACT → OBSERVE → DECIDE loop. This is the heart of the agent system. Unlike Planning
@@ -48,7 +54,17 @@ public class AgentRuntime {
     @Autowired
     private ToolRegistry toolRegistry;
 
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    @Autowired
+    private ApprovalRepository approvalRepository;
+
+    private final ObjectMapper objectMapper;
+
+    // Constructor to configure ObjectMapper for Java 8 date/time
+    public AgentRuntime() {
+        this.objectMapper = new ObjectMapper();
+        this.objectMapper.registerModule(new com.fasterxml.jackson.datatype.jsr310.JavaTimeModule());
+        this.objectMapper.disable(com.fasterxml.jackson.databind.SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+    }
 
     /**
      * Determines if a user request needs the agent runtime loop. Agent runtime is needed when the request has conditional logic where the
@@ -64,6 +80,12 @@ public class AgentRuntime {
     public boolean needsAgentLoop(String userRequest) {
         String lower = userRequest.toLowerCase();
 
+        // Check for deletion requests (require approval)
+        if (lower.contains("delete") || lower.contains("remove") || lower.contains("get rid of")) {
+            logger.info("Agent loop needed: detected deletion request (requires approval)");
+            return true;
+        }
+
         // Conditional keywords
         boolean hasConditional =
                 lower.contains("if ") || lower.contains(" if ") || lower.contains("based on ") || lower.contains("depending on ")
@@ -75,7 +97,7 @@ public class AgentRuntime {
         }
 
         // Future: Could use LLM to make this decision more intelligently
-        logger.info("Agent loop not needed: no conditional logic detected");
+        logger.info("Agent loop not needed: no conditional logic or approval-required operations detected");
         return false;
     }
 
@@ -88,9 +110,13 @@ public class AgentRuntime {
      *         Conversation context (history + memories)
      * @param emitter
      *         SSE emitter for frontend notifications
+     * @param user
+     *         The user making the request
+     * @param conversationId
+     *         The conversation ID
      * @return AgentResult with final state and success status
      */
-    public AgentResult executeAgentLoop(String userRequest, List<Message> context, SseEmitter emitter) {
+    public AgentResult executeAgentLoop(String userRequest, List<Message> context, SseEmitter emitter, User user, Long conversationId) {
         logger.info("==================== AGENT RUNTIME LOOP STARTED ====================");
         logger.info("User request: {}", userRequest);
         logger.info("Max iterations: {}", maxIterations);
@@ -147,8 +173,53 @@ public class AgentRuntime {
                     return AgentResult.success(state, currentIteration);
                 }
 
+                // ===== CHECK APPROVAL =====
+                // Before executing tool, check if it requires human approval
+                Tool tool = toolRegistry.getTool(decision.getToolName());
+
+                if (tool.requiresApproval()) {
+                    // Tool requires approval - PAUSE execution
+                    logger.info("CHECK APPROVAL: Tool '{}' requires human approval", decision.getToolName());
+
+                    // Create approval request
+                    String approvalId = UUID.randomUUID().toString();
+                    ApprovalRequest approvalRequest = new ApprovalRequest(approvalId, user, conversationId, decision.getToolName(),
+                            decision.getArguments());
+
+                    // Serialize agent state for resumption
+                    try {
+                        String agentStateJson = objectMapper.writeValueAsString(state);
+                        approvalRequest.setAgentStateJson(agentStateJson);
+                    } catch (Exception e) {
+                        logger.error("Failed to serialize agent state: {}", e.getMessage());
+                    }
+
+                    // Save to database
+                    approvalRepository.save(approvalRequest);
+                    logger.info("Created approval request: {}", approvalId);
+
+                    // Notify frontend - approval required
+                    try {
+                        Map<String, Object> approvalData = new HashMap<>();
+                        approvalData.put("approvalId", approvalId);
+                        approvalData.put("toolName", decision.getToolName());
+                        approvalData.put("toolArguments", decision.getArguments());
+                        approvalData.put("conversationId", conversationId);
+
+                        emitter.send(SseEmitter.event().name("approval_required").data(approvalData));
+
+                        logger.info("Sent approval_required event to frontend");
+                    } catch (IOException e) {
+                        logger.error("Failed to send approval_required event: {}", e.getMessage());
+                    }
+
+                    // PAUSE: Return with pending approval status
+                    logger.info("==================== AGENT PAUSED - WAITING FOR APPROVAL ====================");
+                    return AgentResult.pendingApproval(state, currentIteration, approvalId);
+                }
+
                 // ===== ACT =====
-                // Execute the tool
+                // Tool doesn't require approval - execute immediately
                 logger.info("ACT: Executing tool '{}' with arguments: {}", decision.getToolName(), decision.getArguments());
 
                 String toolResult = toolExecutor.executeTool(decision.getToolName(), decision.getArguments());
@@ -292,7 +363,8 @@ public class AgentRuntime {
 
         prompt.append("EXAMPLE DECISION MAKING:\n");
         prompt.append("User: \"Calculate 10 + 5\"\n");
-        prompt.append("Correct: {\"decision_type\": \"CALL_TOOL\", \"tool_name\": \"calculator\", \"arguments\": \"{\\\"expression\\\": \\\"10 + 5\\\"}\"}\n");
+        prompt.append(
+                "Correct: {\"decision_type\": \"CALL_TOOL\", \"tool_name\": \"calculator\", \"arguments\": \"{\\\"expression\\\": \\\"10 + 5\\\"}\"}\n");
         prompt.append("Wrong: {\"decision_type\": \"FINAL_ANSWER\"} (you must call calculator first!)\n\n");
 
         prompt.append("User: \"Get time. If after 6PM, calculate 24-18\"\n");

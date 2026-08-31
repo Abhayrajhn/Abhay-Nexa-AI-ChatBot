@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useCallback, useRef } from 'react';
-import { conversationsApi, messagesApi } from '../services/api';
+import { conversationsApi, messagesApi, approvalsApi } from '../services/api';
 import type { Conversation, Message, MessageRole } from '../types';
 
 /**
@@ -38,6 +38,8 @@ interface ChatContextType {
   isStreaming: boolean;  // NEW: True while streaming AI response
   streamingMessage: string;  // NEW: Accumulated chunks of streaming response
   error: string | null;
+  pendingApproval: any | null;  // NEW: Pending approval request
+  isProcessingApproval: boolean;  // NEW: True while processing approval/rejection
 
   // ---- Actions ----
   loadConversations: () => Promise<void>;
@@ -46,6 +48,8 @@ interface ChatContextType {
   deleteConversation: (id: string) => Promise<void>;
   sendMessage: (content: string) => Promise<void>;
   clearError: () => void;
+  approveRequest: () => Promise<void>;  // NEW: Approve pending request
+  rejectRequest: () => Promise<void>;  // NEW: Reject pending request
 }
 
 // ============================================================================
@@ -88,6 +92,10 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   // Streaming states (NEW)
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamingMessage, setStreamingMessage] = useState('');
+
+  // Approval states (NEW)
+  const [pendingApproval, setPendingApproval] = useState<any | null>(null);
+  const [isProcessingApproval, setIsProcessingApproval] = useState(false);
 
   // Error message to show to user
   const [error, setError] = useState<string | null>(null);
@@ -326,6 +334,14 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
 
           // Remove the optimistic user message on error
           setMessages((prev) => prev.filter((m) => m.id !== tempUserMessage.id));
+        },
+        // onApprovalRequired: Called when approval is needed
+        (approvalData) => {
+          console.log('Approval required:', approvalData);
+          setPendingApproval(approvalData);
+          setIsStreaming(false);
+          setStreamingMessage('');
+          setSendingMessage(false);
         }
       );
 
@@ -352,6 +368,138 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     setError(null);
   }, []);
 
+  /**
+   * Approve pending approval request
+   *
+   * Called when:
+   * - User clicks approve button in approval modal
+   */
+  const approveRequest = useCallback(async () => {
+    if (!pendingApproval || !selectedConversationId) {
+      return;
+    }
+
+    try {
+      setIsProcessingApproval(true);
+      setIsStreaming(true);
+      setStreamingMessage('');
+      setError(null);
+
+      console.log('Approving request:', pendingApproval.approvalId);
+
+      let accumulatedContent = '';
+
+      approvalsApi.approve(
+        pendingApproval.approvalId,
+        1, // TODO: Get from authentication context
+        // onChunk
+        (chunk) => {
+          accumulatedContent += chunk;
+          setStreamingMessage(accumulatedContent);
+        },
+        // onDone
+        async () => {
+          console.log('Approval executed successfully');
+
+          // Clear states
+          setPendingApproval(null);
+          setIsProcessingApproval(false);
+          setIsStreaming(false);
+          setStreamingMessage('');
+
+          // Reload messages
+          const allMessages = await messagesApi.getByConversationId(selectedConversationId);
+          setMessages(allMessages);
+
+          // Reload conversations
+          await loadConversations();
+        },
+        // onError
+        (errorMessage) => {
+          console.error('Approval error:', errorMessage);
+          setError('Failed to execute approval: ' + errorMessage);
+          setPendingApproval(null);
+          setIsProcessingApproval(false);
+          setIsStreaming(false);
+          setStreamingMessage('');
+        }
+      );
+    } catch (err) {
+      console.error('Error approving request:', err);
+      setError('Failed to process approval. Please try again.');
+      setPendingApproval(null);
+      setIsProcessingApproval(false);
+      setIsStreaming(false);
+      setStreamingMessage('');
+    }
+  }, [pendingApproval, selectedConversationId, loadConversations]);
+
+  /**
+   * Reject pending approval request
+   *
+   * Called when:
+   * - User clicks reject button in approval modal
+   */
+  const rejectRequest = useCallback(async () => {
+    if (!pendingApproval || !selectedConversationId) {
+      return;
+    }
+
+    try {
+      setIsProcessingApproval(true);
+      setIsStreaming(true);
+      setStreamingMessage('');
+      setError(null);
+
+      console.log('Rejecting request:', pendingApproval.approvalId);
+
+      let accumulatedContent = '';
+
+      approvalsApi.reject(
+        pendingApproval.approvalId,
+        1, // TODO: Get from authentication context
+        // onChunk
+        (chunk) => {
+          accumulatedContent += chunk;
+          setStreamingMessage(accumulatedContent);
+        },
+        // onDone
+        async () => {
+          console.log('Rejection processed successfully');
+
+          // Clear states
+          setPendingApproval(null);
+          setIsProcessingApproval(false);
+          setIsStreaming(false);
+          setStreamingMessage('');
+
+          // Reload messages
+          const allMessages = await messagesApi.getByConversationId(selectedConversationId);
+          setMessages(allMessages);
+
+          // Reload conversations
+          await loadConversations();
+        },
+        // onError
+        (errorMessage) => {
+          console.error('Rejection error:', errorMessage);
+          setError('Failed to process rejection: ' + errorMessage);
+          setPendingApproval(null);
+          setIsProcessingApproval(false);
+          setIsStreaming(false);
+          setStreamingMessage('');
+        }
+      );
+    } catch (err) {
+      console.error('Error rejecting request:', err);
+      setError('Failed to process rejection. Please try again.');
+      setPendingApproval(null);
+      setIsProcessingApproval(false);
+      setIsStreaming(false);
+      setStreamingMessage('');
+    }
+  }, [pendingApproval, selectedConversationId, loadConversations]);
+
   // ---- Context Value ----
 
   /**
@@ -370,6 +518,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     isStreaming,
     streamingMessage,
     error,
+    pendingApproval,
+    isProcessingApproval,
 
     // Actions
     loadConversations,
@@ -378,6 +528,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     deleteConversation,
     sendMessage,
     clearError,
+    approveRequest,
+    rejectRequest,
   };
 
   // ---- Render ----

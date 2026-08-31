@@ -1,6 +1,7 @@
 import { useChatContext } from '../../contexts/ChatContext';
 import MessageList from './MessageList';
 import MessageInput from './MessageInput';
+import ApprovalModal from './ApprovalModal';
 
 /**
  * ChatWindow Component - REDESIGNED
@@ -9,10 +10,19 @@ import MessageInput from './MessageInput';
  * - Gradient background
  * - Smooth animations
  * - Modern empty states
+ * - Approval modal for human-in-the-loop
  */
 
 export default function ChatWindow() {
-  const { selectedConversationId, messages, loadingMessages } = useChatContext();
+  const {
+    selectedConversationId,
+    messages,
+    loadingMessages,
+    pendingApproval,
+    isProcessingApproval,
+    approveRequest,
+    rejectRequest
+  } = useChatContext();
 
   // No conversation selected - beautiful empty state
   if (!selectedConversationId) {
@@ -107,6 +117,16 @@ export default function ChatWindow() {
 
       {/* Input Area */}
       <MessageInput />
+
+      {/* Approval Modal */}
+      {pendingApproval && (
+        <ApprovalModal
+          approvalRequest={pendingApproval}
+          onApprove={approveRequest}
+          onReject={rejectRequest}
+          isProcessing={isProcessingApproval}
+        />
+      )}
     </div>
   );
 }
