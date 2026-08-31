@@ -139,6 +139,9 @@ export const messagesApi = {
    *    event: done
    *    data: {...}
    *
+   *    event: approval_required
+   *    data: {...}
+   *
    * 4. We listen for events and call callbacks
    * 5. When we receive "done", we close the connection
    *
@@ -150,6 +153,7 @@ export const messagesApi = {
    * @param onChunk - Called for each chunk of text
    * @param onDone - Called when streaming completes with the complete message
    * @param onError - Called if an error occurs
+   * @param onApprovalRequired - Called when approval is needed
    * @returns A function to cancel the stream
    */
   sendStream: (
@@ -157,7 +161,8 @@ export const messagesApi = {
     data: SendMessageRequest,
     onChunk: (chunk: string) => void,
     onDone: (message: Message) => void,
-    onError: (error: string) => void
+    onError: (error: string) => void,
+    onApprovalRequired?: (approvalData: any) => void
   ): (() => void) => {
     console.log('Starting streaming request to:', `${API_BASE_URL}/conversations/${conversationId}/messages/stream`);
 
@@ -232,6 +237,18 @@ export const messagesApi = {
                     console.error('Error parsing done event:', e);
                     onError('Failed to parse completion message');
                   }
+                } else if (currentEvent === 'approval_required') {
+                  // Agent needs human approval
+                  try {
+                    const approvalData = JSON.parse(currentData);
+                    console.log('Approval required:', approvalData);
+                    if (onApprovalRequired) {
+                      onApprovalRequired(approvalData);
+                    }
+                  } catch (e) {
+                    console.error('Error parsing approval event:', e);
+                    onError('Failed to parse approval request');
+                  }
                 } else if (currentEvent === 'error') {
                   // Error from backend
                   console.error('Received error event:', currentData);
@@ -258,6 +275,215 @@ export const messagesApi = {
     // Return a cancel function
     return () => {
       console.log('Aborting stream');
+      abortController.abort();
+    };
+  },
+};
+
+// Approval API endpoints
+export const approvalsApi = {
+  /**
+   * Get pending approvals for a user
+   */
+  getPending: (userId: number): Promise<any[]> => {
+    return fetchJSON<any[]>(`/approvals?userId=${userId}`);
+  },
+
+  /**
+   * Approve an approval request and receive streaming response
+   *
+   * @param approvalId - The approval request ID
+   * @param userId - The user ID
+   * @param onChunk - Called for each chunk of text
+   * @param onDone - Called when execution completes
+   * @param onError - Called if an error occurs
+   * @returns A function to cancel the stream
+   */
+  approve: (
+    approvalId: string,
+    userId: number,
+    onChunk: (chunk: string) => void,
+    onDone: () => void,
+    onError: (error: string) => void
+  ): (() => void) => {
+    console.log('Approving request:', approvalId);
+
+    const abortController = new AbortController();
+
+    fetch(`${API_BASE_URL}/approvals/${approvalId}/approve`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ userId }),
+      signal: abortController.signal,
+    })
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+
+        const reader = response.body?.getReader();
+        if (!reader) {
+          throw new Error('Response body is not readable');
+        }
+
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let currentEvent = '';
+        let currentData = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+
+          if (done) {
+            console.log('Approval stream completed');
+            break;
+          }
+
+          buffer += decoder.decode(value, { stream: true });
+
+          let newlineIndex;
+          while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+            const line = buffer.substring(0, newlineIndex);
+            buffer = buffer.substring(newlineIndex + 1);
+
+            if (line.startsWith('event:')) {
+              currentEvent = line.substring(6).trim();
+            } else if (line.startsWith('data:')) {
+              currentData = line.substring(5);
+            } else if (line.trim() === '') {
+              if (currentEvent && currentData) {
+                console.log(`Approval event: ${currentEvent}`);
+
+                if (currentEvent === 'chunk') {
+                  console.log('Approval chunk received:', currentData);
+                  onChunk(currentData);
+                } else if (currentEvent === 'done') {
+                  console.log('Approval execution complete');
+                  onDone();
+                } else if (currentEvent === 'error') {
+                  console.error('Approval error:', currentData);
+                  onError(currentData);
+                }
+
+                currentEvent = '';
+                currentData = '';
+              }
+            }
+          }
+        }
+      })
+      .catch((error) => {
+        if (error.name === 'AbortError') {
+          console.log('Approval stream aborted');
+        } else {
+          console.error('Approval error:', error);
+          onError(error.message || 'Failed to process approval');
+        }
+      });
+
+    return () => {
+      console.log('Aborting approval stream');
+      abortController.abort();
+    };
+  },
+
+  /**
+   * Reject an approval request and receive streaming response
+   *
+   * @param approvalId - The approval request ID
+   * @param userId - The user ID
+   * @param onChunk - Called for each chunk of text
+   * @param onDone - Called when rejection message completes
+   * @param onError - Called if an error occurs
+   * @returns A function to cancel the stream
+   */
+  reject: (
+    approvalId: string,
+    userId: number,
+    onChunk: (chunk: string) => void,
+    onDone: () => void,
+    onError: (error: string) => void
+  ): (() => void) => {
+    console.log('Rejecting request:', approvalId);
+
+    const abortController = new AbortController();
+
+    fetch(`${API_BASE_URL}/approvals/${approvalId}/reject`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ userId }),
+      signal: abortController.signal,
+    })
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+
+        const reader = response.body?.getReader();
+        if (!reader) {
+          throw new Error('Response body is not readable');
+        }
+
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let currentEvent = '';
+        let currentData = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+
+          if (done) {
+            console.log('Rejection stream completed');
+            break;
+          }
+
+          buffer += decoder.decode(value, { stream: true });
+
+          let newlineIndex;
+          while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+            const line = buffer.substring(0, newlineIndex);
+            buffer = buffer.substring(newlineIndex + 1);
+
+            if (line.startsWith('event:')) {
+              currentEvent = line.substring(6).trim();
+            } else if (line.startsWith('data:')) {
+              currentData = line.substring(5);
+            } else if (line.trim() === '') {
+              if (currentEvent && currentData) {
+                console.log(`Rejection event: ${currentEvent}`);
+
+                if (currentEvent === 'chunk') {
+                  onChunk(currentData);
+                } else if (currentEvent === 'done') {
+                  console.log('Rejection complete');
+                  onDone();
+                } else if (currentEvent === 'error') {
+                  console.error('Rejection error:', currentData);
+                  onError(currentData);
+                }
+
+                currentEvent = '';
+                currentData = '';
+              }
+            }
+          }
+        }
+      })
+      .catch((error) => {
+        if (error.name === 'AbortError') {
+          console.log('Rejection stream aborted');
+        } else {
+          console.error('Rejection error:', error);
+          onError(error.message || 'Failed to process rejection');
+        }
+      });
+
+    return () => {
+      console.log('Aborting rejection stream');
       abortController.abort();
     };
   },

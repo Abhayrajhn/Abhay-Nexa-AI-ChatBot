@@ -1,11 +1,11 @@
 package com.abhay.agent;
 
 /**
- * The final result of an agent execution.
- * After the agent loop completes (either by reaching FINAL_ANSWER or max iterations), this object contains: - Whether execution was
- * successful - The final state (including all tool executions) - Number of iterations used - Error message if failed
- * This is returned by AgentRuntime.executeAgentLoop() and used by ConversationService to determine how to proceed (generate final response
- * or handle error).
+ * The final result of an agent execution. After the agent loop completes (either by reaching FINAL_ANSWER, max iterations, or requiring
+ * approval), this object contains: - Whether execution was successful - Whether approval is pending - The final state (including all tool
+ * executions) - Number of iterations used - Error message if failed - Approval ID if pending approval This is returned by
+ * AgentRuntime.executeAgentLoop() and used by ConversationService to determine how to proceed (generate final response, handle error, or
+ * wait for approval).
  */
 public class AgentResult {
 
@@ -13,6 +13,16 @@ public class AgentResult {
      * Whether the agent successfully completed the task.
      */
     private boolean success;
+
+    /**
+     * Whether the agent is waiting for approval. If true, execution is paused pending user decision.
+     */
+    private boolean pendingApproval;
+
+    /**
+     * Approval request ID if pendingApproval is true.
+     */
+    private String approvalId;
 
     /**
      * The final agent state (includes all tool executions).
@@ -38,6 +48,7 @@ public class AgentResult {
         this.success = success;
         this.finalState = finalState;
         this.iterationsUsed = iterationsUsed;
+        this.pendingApproval = false;
     }
 
     // Factory methods
@@ -58,6 +69,16 @@ public class AgentResult {
         return result;
     }
 
+    /**
+     * Create a pending approval result. The agent has paused and is waiting for user decision.
+     */
+    public static AgentResult pendingApproval(AgentState finalState, int iterationsUsed, String approvalId) {
+        AgentResult result = new AgentResult(true, finalState, iterationsUsed);
+        result.setPendingApproval(true);
+        result.setApprovalId(approvalId);
+        return result;
+    }
+
     // Getters and Setters
 
     public boolean isSuccess() {
@@ -66,6 +87,22 @@ public class AgentResult {
 
     public void setSuccess(boolean success) {
         this.success = success;
+    }
+
+    public boolean isPendingApproval() {
+        return pendingApproval;
+    }
+
+    public void setPendingApproval(boolean pendingApproval) {
+        this.pendingApproval = pendingApproval;
+    }
+
+    public String getApprovalId() {
+        return approvalId;
+    }
+
+    public void setApprovalId(String approvalId) {
+        this.approvalId = approvalId;
     }
 
     public AgentState getFinalState() {
@@ -94,7 +131,9 @@ public class AgentResult {
 
     @Override
     public String toString() {
-        if (success) {
+        if (pendingApproval) {
+            return String.format("AgentResult{pendingApproval=true, approvalId=%s, iterations=%d}", approvalId, iterationsUsed);
+        } else if (success) {
             return String.format("AgentResult{success=true, iterations=%d, toolCalls=%d}", iterationsUsed,
                     finalState != null ? finalState.getToolExecutions().size() : 0);
         } else {
