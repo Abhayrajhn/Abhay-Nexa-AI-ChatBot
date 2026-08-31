@@ -1,5 +1,8 @@
 package com.abhay.service;
 
+import com.abhay.agent.AgentResult;
+import com.abhay.agent.AgentRuntime;
+import com.abhay.agent.AgentState;
 import com.abhay.client.OpenAIClient;
 import com.abhay.entity.Conversation;
 import com.abhay.entity.Message;
@@ -84,6 +87,9 @@ public class ConversationService implements IConversationService {
 
     @Autowired
     private MemoryRetriever memoryRetriever;
+
+    @Autowired
+    private AgentRuntime agentRuntime;
 
     @Value("${openai.system.message}")
     private String systemMessage;
@@ -267,16 +273,23 @@ public class ConversationService implements IConversationService {
             List<ToolDefinition> toolDefinitions = toolRegistry.getAllDefinitions();
             logger.info("Available tools: {}", toolRegistry.getToolCount());
 
-            // 7. DECISION POINT: Does this request need planning?
-            if (planner.needsPlanning(content)) {
-                // PLANNING FLOW (NEW)
-                logger.info("Using PLANNING flow for request");
+            // 7. DECISION POINT: Which execution flow?
+            // Priority: Agent Runtime > Planning > Tool Calling
+            if (agentRuntime.needsAgentLoop(content)) {
+                // AGENT RUNTIME FLOW (NEW)
+                logger.info("Using AGENT RUNTIME flow for request (dynamic decision-making)");
+                CompletableFuture.runAsync(() -> {
+                    handleAgentRuntimeFlow(content, llmMessages, emitter, conversation, user);
+                });
+            } else if (planner.needsPlanning(content)) {
+                // PLANNING FLOW
+                logger.info("Using PLANNING flow for request (predetermined steps)");
                 CompletableFuture.runAsync(() -> {
                     handlePlanningFlow(content, llmMessages, emitter, conversation, user);
                 });
             } else {
-                // TOOL CALLING FLOW (EXISTING)
-                logger.info("Using TOOL CALLING flow for request");
+                // TOOL CALLING FLOW (SIMPLE)
+                logger.info("Using TOOL CALLING flow for request (simple or no tools)");
                 handleToolCallingFlow(llmMessages, toolDefinitions, emitter, conversation, user);
             }
 
@@ -588,6 +601,106 @@ public class ConversationService implements IConversationService {
                 emitter.completeWithError(ioException);
             }
         }
+    }
+
+    /**
+     * Handle agent runtime flow for dynamic decision-making. This flow implements the DECIDE → ACT → OBSERVE → DECIDE loop. The agent
+     * iteratively: 1. Decides what to do next based on current state 2. Executes tools as needed 3. Observes the results 4. Decides again
+     * based on new information 5. Repeats until task is complete or max iterations reached After the agent loop completes, we generate a
+     * final natural language response and stream it to the frontend.
+     *
+     * @param userRequest
+     *         The original user request
+     * @param llmMessages
+     *         Conversation context (history + memories)
+     * @param emitter
+     *         SSE emitter for streaming to frontend
+     * @param conversation
+     *         Database conversation entity
+     * @param user
+     *         User entity for memory extraction
+     */
+    private void handleAgentRuntimeFlow(String userRequest, List<com.abhay.model.llm.Message> llmMessages, SseEmitter emitter,
+            Conversation conversation, User user) {
+        try {
+            logger.info("Starting AGENT RUNTIME flow for request: {}", userRequest);
+
+            // Execute the agent loop
+            // The agent will iterate through DECIDE → ACT → OBSERVE until complete
+            AgentResult result = agentRuntime.executeAgentLoop(userRequest, llmMessages, emitter);
+
+            if (!result.isSuccess()) {
+                // Agent loop failed (max iterations or error)
+                logger.error("Agent loop failed: {}", result.getErrorMessage());
+
+                // Generate a safe fallback response
+                String fallbackResponse = "I attempted to complete your request but encountered difficulties. " + "Here's what I tried:\n\n"
+                        + result.getFinalState().getToolHistorySummary()
+                        + "\n\nCould you please rephrase your request or break it into smaller steps?";
+
+                // Stream the fallback response
+                emitter.send(SseEmitter.event().name("chunk").data(fallbackResponse));
+
+                // Save and complete
+                saveAndCompleteResponse(fallbackResponse, emitter, conversation, user, userRequest);
+                return;
+            }
+
+            // Agent loop succeeded!
+            logger.info("Agent loop completed successfully after {} iterations", result.getIterationsUsed());
+
+            // Now we need to generate the final natural language response
+            // The agent has gathered all necessary information via tools
+            // We'll ask the LLM to formulate a final answer based on the tool results
+
+            // Build context for final response
+            logger.info("Generating final natural language response...");
+
+            // Add a summary of what the agent did
+            String agentSummary = buildAgentExecutionSummary(result);
+            llmMessages.add(new com.abhay.model.llm.Message("system", agentSummary));
+
+            // Add instruction to generate final response
+            llmMessages.add(new com.abhay.model.llm.Message("system",
+                    "Based on the tool execution results above, provide a clear, natural language response to the user's original request. "
+                            + "Be concise and focus on answering what they asked. "
+                            + "Do not mention the internal tools or steps you used - just provide the answer."));
+
+            // Get final response from LLM (non-streaming for now, can be enhanced later)
+            String finalResponse = openAIClient.sendMessage(llmMessages);
+            logger.info("Final response generated, length: {}", finalResponse.length());
+
+            // Stream the final response to frontend
+            emitter.send(SseEmitter.event().name("chunk").data(finalResponse));
+
+            // Save and complete
+            saveAndCompleteResponse(finalResponse, emitter, conversation, user, userRequest);
+
+        } catch (Exception e) {
+            logger.error("Error during agent runtime flow: {}", e.getMessage(), e);
+            try {
+                emitter.send(SseEmitter.event().name("error").data("Agent execution failed: " + e.getMessage()));
+                emitter.completeWithError(e);
+            } catch (IOException ioException) {
+                logger.error("Error sending error event: {}", ioException.getMessage());
+                emitter.completeWithError(ioException);
+            }
+        }
+    }
+
+    /**
+     * Build a summary of agent execution for the final LLM call. This provides context about what tools were executed and their results.
+     */
+    private String buildAgentExecutionSummary(AgentResult result) {
+        StringBuilder summary = new StringBuilder();
+        summary.append("Agent execution completed. Here's what I did:\n\n");
+
+        for (AgentState.ToolExecution exec : result.getFinalState().getToolExecutions()) {
+            summary.append(String.format("- Called %s tool: %s\n", exec.getToolName(), exec.getResult()));
+        }
+
+        summary.append("\nNow provide a natural language response based on these results.");
+        return summary.toString();
     }
 
     /**
